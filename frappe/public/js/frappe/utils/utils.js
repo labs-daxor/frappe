@@ -1608,7 +1608,10 @@ Object.assign(frappe.utils, {
 		 *	max_no_of_decimals - max number of decimals of the shortened number
 		 */
 
-		// return empty for null, undefined, or empty string
+		// return empty for null, undefined, or empty string (but keep "0" as "0")
+		if (number === 0 || number === "0") {
+			return "0";
+		}
 		if (!number || isNaN(number)) {
 			return "";
 		}
