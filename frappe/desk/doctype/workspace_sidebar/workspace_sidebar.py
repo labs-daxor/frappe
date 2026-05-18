@@ -49,6 +49,7 @@ class WorkspaceSidebar(Document):
 	def get_can_read_items(self):
 		if not self.user.can_read:
 			self.user.build_permissions()
+		return self.user.can_read
 
 	def before_save(self):
 		self.export_sidebar()
