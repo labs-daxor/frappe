@@ -103,13 +103,13 @@ frappe.ui.menu = class ContextMenu {
 				item.action ? `return ${item.action}` : ""
 			}">
 				<a>
-					<div class="menu-item-icon" ${!(iconMarkup != "") ? "hidden" : ""}>
+					<div class="frappe-menu-item-icon" ${!(iconMarkup != "") ? "hidden" : ""}>
 						${iconMarkup}
 					</div>
 					<span class="menu-item-title">${__(item.label)}</span>
 					${
 						item.items && item.items.length
-							? `<div class="menu-item-icon" style="margin-left:auto">
+							? `<div class="frappe-menu-item-icon" style="margin-left:auto">
 						${frappe.utils.icon(`chevron-${chevron_direction}`)}
 					</div>`
 							: ""
@@ -303,8 +303,11 @@ frappe.ui.create_menu = function (opts) {
 
 	document.addEventListener(
 		"click",
-		function () {
-			if (frappe.menu_map[context_menu.name].visible) {
+		function (e) {
+			if (
+				frappe.menu_map[context_menu.name].visible &&
+				!context_menu.template[0].contains(e.target)
+			) {
 				frappe.menu_map[context_menu.name].hide();
 				opts.onHide && opts.onHide(opts.parent);
 			}
