@@ -200,6 +200,7 @@ def upload_file():
 	if method:
 		method = frappe.get_attr(method)
 		is_whitelisted(method)
+		is_valid_http_method(method)
 		return method()
 	else:
 		return frappe.get_doc(
@@ -315,6 +316,7 @@ def run_doc_method(method, docs=None, dt=None, dn=None, arg=None, args=None):
 	else:
 		response = doc.run_method(method, **args)
 
+	doc.apply_fieldlevel_read_permissions()
 	frappe.response.docs.append(doc)
 	if response is None:
 		return

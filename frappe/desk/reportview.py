@@ -4,7 +4,9 @@
 """build query for doclistview and return results"""
 
 import json
+import re
 from functools import lru_cache
+from typing import Any
 
 from sql_metadata import Parser
 
@@ -20,6 +22,9 @@ from frappe.utils import add_user_info, cint, format_duration
 from frappe.utils.data import sbool
 
 DISALLOWED_PARAMS = ("cmd", "data", "ignore_permissions", "view", "user", "csrf_token", "join")
+SUPPORTED_AGGREGATE_FUNCTIONS = ("count", "sum", "avg")
+DEFAULT_AGGREGATE_FIELDNAME = "_aggregate_column"
+_FIELDNAME_RE = re.compile(r"^[a-zA-Z0-9_]+$")
 
 
 @frappe.whitelist()
@@ -53,6 +58,8 @@ def get_list():
 @frappe.whitelist()
 @frappe.read_only()
 def get_count() -> int | None:
+	from frappe.query_builder.functions import Count
+
 	args = get_form_params()
 
 	if is_virtual_doctype(args.doctype):
@@ -64,23 +71,24 @@ def get_count() -> int | None:
 	fieldname = f"`tab{args.doctype}`.name"
 	args.order_by = None
 
-	# args.limit is specified to avoid getting accurate count.
-	if not args.limit:
-		args.fields = [fieldname]
-		partial_query = execute(**args, run=0).get_sql()
-		return frappe.db.sql(f"select count(*) from ( {partial_query} ) p")[0][0]
-
 	args.fields = [fieldname]
 	partial_query = execute(**args, run=0)
+	count_query = frappe.qb.from_(partial_query).select(Count("*"))
+
+	# args.limit is specified to avoid getting accurate count.
+	if not args.limit:
+		return count_query.run()[0][0]
+
+	count_sql, count_params = count_query.walk()
 
 	# Count queries are notoriously unpredictable based on the type of filters used.
 	# We should not attempt to fetch accurate count for 2 entire minutes! (default timeout)
 	# Very short timeout is used to here to set an upper bound on damage a bad request can do.
 	# Users can request accurate count by dropping limit from arguments.
-	timeout_clause = "SET STATEMENT max_statement_time=1 FOR" if frappe.db.db_type == "mariadb" else ""
+	timeout_clause = "SET STATEMENT max_statement_time=1 FOR " if frappe.db.db_type == "mariadb" else ""
 
 	try:
-		count = frappe.db.sql(f"{timeout_clause} select count(*) from ( {partial_query} ) p")[0][0]
+		count = frappe.db.sql(timeout_clause + count_sql, count_params)[0][0]
 	except Exception as e:
 		if frappe.db.is_statement_timeout(e):  # Skip fetching accurate count
 			count = None
@@ -204,6 +212,39 @@ def raise_invalid_field(fieldname):
 	frappe.throw(_("Field not permitted in query") + f": {fieldname}", frappe.DataError)
 
 
+def _validate_group_by_field(raw: str, doctype: str):
+	"""Validate a single `tabDoctype`.`fieldname` expression from saved report JSON."""
+	if not isinstance(raw, str) or not raw:
+		raise_invalid_field(raw)
+	try:
+		field_doctype, fieldname = parse_field(raw)
+	except ValueError:
+		raise_invalid_field(raw)
+	field_doctype = field_doctype or doctype
+	if not _FIELDNAME_RE.match(fieldname):
+		raise_invalid_field(raw)
+	try:
+		has_col = frappe.db.has_column(field_doctype, fieldname)
+	except frappe.db.TableMissingError:
+		raise_invalid_field(raw)
+	if not has_col:
+		raise_invalid_field(raw)
+
+
+def _validate_group_by_args(group_by: dict, doctype: str):
+	raw_func = group_by.get("aggregate_function")
+	if not isinstance(raw_func, str):
+		frappe.throw(_("Invalid aggregate function: {0}").format(raw_func), frappe.DataError)
+	func = raw_func.lower()
+	if func not in SUPPORTED_AGGREGATE_FUNCTIONS:
+		frappe.throw(_("Invalid aggregate function: {0}").format(func), frappe.DataError)
+
+	_validate_group_by_field(group_by.get("group_by", ""), doctype)
+
+	if func != "count":
+		_validate_group_by_field(group_by.get("aggregate_on", ""), doctype)
+
+
 def is_standard(fieldname):
 	if "." in fieldname:
 		fieldname = fieldname.split(".")[1].strip("`")
@@ -319,7 +360,7 @@ def compress(data, args=None):
 
 
 @frappe.whitelist(methods=["POST", "PUT"])
-def save_report(name, doctype, report_settings):
+def save_report(name: str | int, doctype: str, report_settings: str):
 	"""Save reports of type Report Builder from Report View"""
 
 	if frappe.db.exists("Report", name):
@@ -344,6 +385,10 @@ def save_report(name, doctype, report_settings):
 		report.report_name = name
 		report.ref_doctype = doctype
 
+	settings = json.loads(report_settings)
+	if isinstance(settings, dict) and isinstance(group_by := settings.get("group_by"), dict):
+		_validate_group_by_args(group_by, report.ref_doctype)
+
 	report.report_type = "Report Builder"
 	report.json = report_settings
 	report.save(ignore_permissions=True)
@@ -356,7 +401,7 @@ def save_report(name, doctype, report_settings):
 
 
 @frappe.whitelist(methods=["POST", "DELETE"])
-def delete_report(name):
+def delete_report(name: str | int):
 	"""Delete reports of type Report Builder from Report View"""
 
 	report = frappe.get_doc("Report", name)
@@ -572,12 +617,14 @@ def get_field_info(fields, parent_doctype):
 			translatable = True
 		else:
 			meta = frappe.get_meta(doctype)
-			meta_df = meta.get_field(fieldname)
-			df = meta_df or get_default_df(fieldname)
+			df = meta.get_field(fieldname) or get_default_df(fieldname)
 
 			if df:
 				fieldname = df.fieldname
-				label = _(df.label or "") if meta_df else meta.get_label(fieldname)
+
+				# default fields have no df.label; their labels come pre-translated from meta.get_label
+				label = _(df.label) if df.label else meta.get_label(fieldname) or ""
+
 				fieldtype = df.fieldtype
 				translatable = df.translatable or False
 				options = df.options
@@ -661,11 +708,13 @@ def delete_items():
 
 	if len(items) > 10:
 		frappe.enqueue("frappe.desk.reportview.delete_bulk", doctype=doctype, items=items)
-	else:
-		delete_bulk(doctype, items)
+		return None
+
+	return delete_bulk(doctype, items)
 
 
 def delete_bulk(doctype, items):
+	"""Delete documents one by one. Returns names that could not be deleted."""
 	undeleted_items = []
 	for i, d in enumerate(items):
 		try:
@@ -690,22 +739,26 @@ def delete_bulk(doctype, items):
 			frappe.db.rollback()
 	if undeleted_items and len(items) != len(undeleted_items):
 		frappe.clear_messages()
-		delete_bulk(doctype, undeleted_items)
+		return delete_bulk(doctype, undeleted_items)
 	elif undeleted_items:
 		frappe.msgprint(
 			_("Failed to delete {0} documents: {1}").format(len(undeleted_items), ", ".join(undeleted_items)),
 			realtime=True,
 			title=_("Bulk Operation Failed"),
 		)
-	else:
-		frappe.msgprint(
-			_("Deleted all documents successfully"), realtime=True, title=_("Bulk Operation Successful")
-		)
+		return undeleted_items
+
+	frappe.msgprint(
+		_("Deleted all documents successfully"), realtime=True, title=_("Bulk Operation Successful")
+	)
+	return []
 
 
 @frappe.whitelist()
 @frappe.read_only()
-def get_sidebar_stats(stats, doctype, filters=None):
+def get_sidebar_stats(
+	stats: str | list[str], doctype: str, filters: str | list | dict[str, Any] | None = None
+):
 	if filters is None:
 		filters = []
 
@@ -721,7 +774,7 @@ def get_sidebar_stats(stats, doctype, filters=None):
 
 @frappe.whitelist()
 @frappe.read_only()
-def get_stats(stats, doctype, filters=None):
+def get_stats(stats: str, doctype: str, filters: str | None = None):
 	"""get tag info"""
 	import json
 
@@ -734,7 +787,7 @@ def get_stats(stats, doctype, filters=None):
 
 	try:
 		db_columns = frappe.db.get_table_columns(doctype)
-	except frappe.db.InternalError, frappe.db.ProgrammingError:
+	except (frappe.db.InternalError, frappe.db.ProgrammingError):
 		# raised when _user_tags column is added on the fly
 		# raised if its a virtual doctype
 		db_columns = []
@@ -778,7 +831,7 @@ def get_stats(stats, doctype, filters=None):
 
 
 @frappe.whitelist()
-def get_filter_dashboard_data(stats, doctype, filters=None):
+def get_filter_dashboard_data(stats: str, doctype: str, filters: str | None = None):
 	"""get tags info"""
 	import json
 

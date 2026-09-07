@@ -32,7 +32,7 @@ from frappe.database.utils import (
 	is_query_type,
 )
 from frappe.exceptions import DoesNotExistError, ImplicitCommitError
-from frappe.monitor import get_trace_id
+from frappe.monitor import TRACE_ID_PATTERN, get_trace_id
 from frappe.query_builder import Case
 from frappe.query_builder.functions import Count
 from frappe.utils import (
@@ -265,7 +265,7 @@ class Database:
 
 		query, values = self._transform_query(query, values)
 
-		if trace_id := get_trace_id():
+		if (trace_id := get_trace_id()) and TRACE_ID_PATTERN.fullmatch(trace_id):
 			query += f" /* FRAPPE_TRACE_ID: {trace_id} */"
 
 		try:
@@ -1299,9 +1299,23 @@ class Database:
 			self.value_cache[dt][cache_key] = count
 		return count
 
-	def estimate_count(self, doctype: str) -> int:
-		"""Get estimated count of total rows in a table."""
+	def _estimate_count(self, table: str) -> int:
+		"""Get estimated count of total rows in a single table. Override in subclasses."""
 		raise NotImplementedError
+
+	def estimate_count(self, doctype: str) -> int:
+		"""Get estimated count of total rows in a table.
+
+		The estimate is read one table at a time and cached in Redis with a 60-minute TTL
+		to avoid hammering information_schema.
+		"""
+		table = get_table_name(doctype)
+		cache_key = f"estimate_count::{table}"
+		count = frappe.cache.get_value(cache_key)
+		if count is None:
+			count = self._estimate_count(table)
+			frappe.cache.set_value(cache_key, count, expires_in_sec=60 * 60)
+		return count
 
 	@staticmethod
 	def format_date(date):
@@ -1344,7 +1358,7 @@ class Database:
 			)
 
 			if columns:
-				frappe.cache.set_value(key, columns)
+				frappe.client_cache.set_value(key, columns)
 
 		return columns
 

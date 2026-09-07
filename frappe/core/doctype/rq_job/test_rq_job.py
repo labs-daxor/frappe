@@ -181,6 +181,11 @@ class TestRQJob(IntegrationTestCase):
 		# Observed higher usage on 3.14. Temporarily raising the limit
 		LAST_MEASURED_USAGE += 6
 
+		# Observed higher usage after Python 3.14.6 (released 2026-06). The same bump was
+		# applied to develop in https://github.com/frappe/frappe/pull/39529 but was not
+		# backported here. Environmental drift (Python interpreter growth), not a frappe import.
+		LAST_MEASURED_USAGE += 1
+
 		self.assertLessEqual(rss, LAST_MEASURED_USAGE * 1.05, msg)
 
 	def test_clear_failed_jobs(self):
@@ -190,6 +195,15 @@ class TestRQJob(IntegrationTestCase):
 		jobs = [frappe.enqueue(method=self.BG_JOB, queue="short", fail=True) for _ in range(limit * 2)]
 		self.check_status(jobs[-1], "failed")
 		self.assertLessEqual(RQJob.get_count(filters=[["RQ Job", "status", "=", "failed"]]), limit * 1.2)
+
+	def test_pickle_lazy_doc_for_rq_job(self):
+		job = frappe.enqueue(test_serialization, user=frappe.get_lazy_doc("User", "Guest"))
+		self.check_status(job, "finished")
+
+
+def test_serialization(user):
+	assert user.roles
+	return True
 
 
 def test_func(fail=False, sleep=0):

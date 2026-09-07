@@ -417,12 +417,7 @@ frappe.views.QueryReport = class QueryReport extends frappe.views.BaseList {
 			.then((doc) => {
 				this.report_doc = doc;
 			})
-			.then(() => frappe.model.with_doctype(this.report_doc?.ref_doctype))
-			.then(
-				() =>
-					this.report_doc.module &&
-					frappe.app.sidebar.show_sidebar_for_module(this.report_doc.module)
-			);
+			.then(() => frappe.model.with_doctype(this.report_doc?.ref_doctype));
 	}
 
 	get_report_settings() {
@@ -764,6 +759,8 @@ frappe.views.QueryReport = class QueryReport extends frappe.views.BaseList {
 				this.hide_status();
 				clearInterval(this.interval);
 				clearInterval(this.stale_report_interval);
+				this.snapshot_report = data.snapshot_report;
+				this.snapshot_at = data.snapshot_at;
 				this.refreshed_at = frappe.datetime.now_datetime();
 				this.execution_time = data.execution_time || 0.1;
 
@@ -795,7 +792,21 @@ frappe.views.QueryReport = class QueryReport extends frappe.views.BaseList {
 					}
 				};
 
-				this.stale_report_interval = setInterval(check_if_report_is_stale, 60000);
+				if (this.snapshot_report) {
+					if (data.result.length > 0) {
+						let diff = frappe.datetime.comment_when(this.snapshot_at);
+						let pretty_diff = `<span style="color:var(--red-600)">${diff}</span>`;
+						this.show_status(`
+						<div class="indicator orange pl-1">
+							<span>
+								${__("This is a snapshot report generated {0}.", [pretty_diff])}
+							</span>
+						</div>
+					`);
+					}
+				} else {
+					this.stale_report_interval = setInterval(check_if_report_is_stale, 60000);
+				}
 
 				if (data.custom_filters) {
 					this.set_filters(data.custom_filters);
@@ -884,7 +895,7 @@ frappe.views.QueryReport = class QueryReport extends frappe.views.BaseList {
 	}
 
 	add_prepared_report_buttons(doc) {
-		if (doc) {
+		if (doc && frappe.model.can_read("Prepared Report")) {
 			this.page.add_inner_button(
 				__("Download Report"),
 				function () {
@@ -1663,12 +1674,11 @@ frappe.views.QueryReport = class QueryReport extends frappe.views.BaseList {
 		return print_settings.columns?.length || !custom_format ? "print_grid" : custom_format;
 	}
 
-	async get_report_print_format(report_name) {
-		const filters = {
-			name: report_name,
-			disabled: 0,
-		};
-		const r = await frappe.db.get_value("Print Format", filters, ["html", "css"]);
+	async get_report_print_format(print_format) {
+		const r = await frappe.call({
+			method: "frappe.desk.query_report.get_print_format_data",
+			args: { print_format },
+		});
 		if (r && r.message && r.message.html) {
 			const css = r.message.css || "";
 			const html = r.message.html || "";

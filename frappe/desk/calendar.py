@@ -2,15 +2,17 @@
 # License: MIT. See LICENSE
 
 import json
+from datetime import date
 
 import frappe
 from frappe import _
 from frappe.query_builder import functions
 from frappe.query_builder.terms import ValueWrapper
+from frappe.utils import get_datetime, getdate
 
 
 @frappe.whitelist()
-def update_event(args, field_map):
+def update_event(args: str, field_map: str):
 	"""Updates Event (called via calendar) based on passed `field_map`"""
 	args = frappe._dict(json.loads(args))
 	field_map = frappe._dict(json.loads(field_map))
@@ -31,7 +33,16 @@ def get_event_conditions(doctype, filters=None):
 
 
 @frappe.whitelist()
-def get_events(doctype, start, end, field_map, filters=None, fields=None):
+def get_events(
+	doctype: str,
+	start: str | date,
+	end: str | date,
+	field_map: str,
+	filters: str | None = None,
+	fields: str | list[str] | None = None,
+):
+	start, end = getdate(start), get_datetime(end)
+
 	field_map = frappe._dict(json.loads(field_map))
 	fields = frappe.parse_json(fields)
 
@@ -47,6 +58,11 @@ def get_events(doctype, start, end, field_map, filters=None, fields=None):
 
 	if field_map.color:
 		fields.append(field_map.color)
+
+	valid_columns = doc_meta.get_valid_columns()
+	for key in ("start", "end"):
+		if field_map.get(key) not in valid_columns:
+			frappe.throw(_("{0} is not a valid field of {1}").format(field_map.get(key), doctype))
 
 	dt = frappe.qb.DocType(doctype)
 	start_field = functions.IfNull(dt[field_map.start], ValueWrapper("0001-01-01 00:00:00"))

@@ -210,6 +210,14 @@ class Importer:
 
 					log_index += 1
 
+					try:
+						frappe.logger("data_import").error(
+							f"Data Import {self.data_import.name}: row(s) {row_indexes} failed to import",
+							exc_info=True,
+						)
+					except Exception:
+						pass
+
 		# Logs are db inserted directly so will have to be fetched again
 		import_log = (
 			frappe.get_all(
@@ -233,6 +241,12 @@ class Importer:
 			status = "Error"
 		elif len(failures) > 0 and len(successes) > 0:
 			status = "Partial Success"
+			try:
+				frappe.logger("data_import").warning(
+					f"Data Import {self.data_import.name}: {len(failures)} of {total_payload_count} rows failed"
+				)
+			except Exception:
+				pass
 		elif len(successes) == total_payload_count:
 			status = "Success"
 		else:
@@ -615,7 +629,7 @@ class ImportFile:
 		if extension == "csv":
 			data = read_csv_content(content, use_sniffer=self.use_sniffer)
 		elif extension == "xlsx":
-			data = read_xlsx_file_from_attached_file(fcontent=content)
+			data = read_xlsx_file_from_attached_file(fcontent=content, read_only=True)
 		elif extension == "xls":
 			data = read_xls_file_from_attached_file(content)
 		return data

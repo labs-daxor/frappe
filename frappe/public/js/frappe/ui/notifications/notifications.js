@@ -131,6 +131,7 @@ frappe.ui.Notifications = class Notifications {
 		e.stopImmediatePropagation();
 		this.dropdown_list.find(".unread").removeClass("unread");
 		frappe.call("frappe.desk.doctype.notification_log.notification_log.mark_all_as_read");
+		this.tabs.notifications?.update_count_badge(0);
 	}
 
 	setup_dropdown_events() {
@@ -225,7 +226,18 @@ class NotificationsView extends BaseNotificationsView {
 			.attr("title", __("Notifications"))
 			.tooltip({ delay: { show: 600, hide: 100 }, trigger: "hover" });
 
+		this.bell_indicator = this.parent.find(".desktop-notification-icon");
+		if (!this.bell_indicator.length) {
+			this.bell_indicator = this.parent
+				.closest(".body-sidebar")
+				?.find(".sidebar-notification .sidebar-item-icon");
+		}
+
 		this.setup_notification_listeners();
+
+		this.unread_count = frappe.boot.notification_unread_count || 0;
+		this.update_count_badge(this.unread_count);
+
 		this.get_notifications_list(this.max_length).then((r) => {
 			if (!r.message) return;
 			this.dropdown_items = r.message.notification_logs;
@@ -270,6 +282,7 @@ class NotificationsView extends BaseNotificationsView {
 			})
 			.then(() => {
 				$el.removeClass("unread");
+				this.update_count_badge(Math.max(this.unread_count - 1, 0));
 			});
 	}
 
@@ -284,7 +297,8 @@ class NotificationsView extends BaseNotificationsView {
 		let doc_link = this.get_item_link(notification_log);
 
 		let read_class = notification_log.read ? "" : "unread";
-		let message = notification_log.subject;
+		// Title/Description are the canonical fields; fall back to the legacy subject/content.
+		let message = notification_log.title || notification_log.subject || "";
 
 		let title = message.match(/<b class="subject-title">(.*?)<\/b>/);
 		message = title
@@ -381,12 +395,37 @@ class NotificationsView extends BaseNotificationsView {
 		const link_docname = notification_doc.document_name
 			? notification_doc.document_name
 			: notification_doc.name;
-		return frappe.utils.get_form_link(link_doctype, link_docname);
+		const form_link = frappe.utils.get_form_link(link_doctype, link_docname);
+		// the timeline renders each entry with `id="<doctype>-<name>"`, so the
+		// source record anchors the link to the exact spot in the document
+		if (notification_doc.source_doctype && notification_doc.source_name) {
+			const anchor = `${frappe.scrub(notification_doc.source_doctype)}-${
+				notification_doc.source_name
+			}`;
+			return `${form_link}#${anchor}`;
+		}
+		return form_link;
 	}
 
 	toggle_notification_icon(seen) {
-		this.notifications_icon.find(".notifications-seen").toggle(seen);
-		this.notifications_icon.find(".notifications-unseen").toggle(!seen);
+		this.bell_indicator?.toggleClass("indicator blue", !seen);
+	}
+
+	update_count_badge(count) {
+		this.unread_count = count;
+		const $suffix = this.parent
+			.closest(".body-sidebar")
+			?.find(".sidebar-notification .sidebar-notification-count");
+		if (!$suffix?.length) return;
+
+		if (count > 0) {
+			$suffix
+				.text(count > 99 ? "99+" : count)
+				.attr("aria-label", __("{0} unread notifications", [count]))
+				.removeClass("hidden");
+		} else {
+			$suffix.removeAttr("aria-label").addClass("hidden");
+		}
 	}
 
 	toggle_seen(flag) {
@@ -401,17 +440,20 @@ class NotificationsView extends BaseNotificationsView {
 
 	setup_notification_listeners() {
 		frappe.realtime.on("notification", () => {
+			this.settings.seen = 0;
 			this.toggle_notification_icon(false);
+			this.update_count_badge(this.unread_count + 1);
 			this.update_dropdown();
 		});
 
 		frappe.realtime.on("indicator_hide", () => {
+			this.settings.seen = 1;
 			this.toggle_notification_icon(true);
 		});
 
 		this.parent.on("show.bs.dropdown", () => {
 			this.toggle_seen(true);
-			if (this.notifications_icon.find(".notifications-unseen").is(":visible")) {
+			if (this.bell_indicator?.hasClass("indicator")) {
 				this.toggle_notification_icon(true);
 				frappe.call(
 					"frappe.desk.doctype.notification_log.notification_log.trigger_indicator_hide"
@@ -463,13 +505,15 @@ class EventsView extends BaseNotificationsView {
 				// REDESIGN-TODO: Add location to calendar field
 				let location = "";
 				if (event.location) {
-					location = `, ${event.location}`;
+					location = `, ${frappe.utils.escape_html(event.location)}`;
 				}
 
-				return `<a class="recent-item event" href="/desk/event/${event.name}">
-					<div class="event-border" style="border-color: ${event.color}"></div>
+				return `<a class="recent-item event" href="/desk/event/${frappe.utils.escape_html(
+					event.name
+				)}">
+					<div class="event-border" style="border-color: ${frappe.utils.escape_html(event.color)}"></div>
 					<div class="event-item">
-						<div class="event-subject">${event.subject}</div>
+						<div class="event-subject">${frappe.utils.escape_html(event.subject)}</div>
 						<div class="event-time">${time}${location}</div>
 						${particpants}
 					</div>

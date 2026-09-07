@@ -58,6 +58,32 @@ def get_report_doc(report_name):
 	return doc
 
 
+@frappe.whitelist()
+def get_print_format_data(print_format: str):
+	pf = frappe.db.get_value(
+		"Print Format",
+		{"name": print_format, "disabled": 0, "print_format_for": "Report"},
+		["report", "html", "css"],
+		as_dict=True,
+	)
+	if not pf:
+		frappe.throw(
+			_("{0} is not an enabled Print Format for a Report").format(frappe.bold(print_format)),
+			frappe.DoesNotExistError,
+		)
+
+	# get_report_doc enforces the referenced Report's own permission model before we hand out its print format
+	report = get_report_doc(pf.report)
+
+	if not frappe.has_permission(report.ref_doctype, "print"):
+		frappe.throw(
+			_("You don't have permission to print: {0}").format(_(report.ref_doctype)),
+			frappe.PermissionError,
+		)
+
+	return {"html": pf.html, "css": pf.css}
+
+
 def get_report_result(report, filters):
 	res = None
 
@@ -129,7 +155,7 @@ def generate_report_result(
 	if isinstance(filters, dict) and filters.get("translate_data"):
 		result = translate_report_data(result, has_total_row)
 
-	return {
+	return_dict = {
 		"result": result,
 		"columns": columns,
 		"message": message,
@@ -139,6 +165,24 @@ def generate_report_result(
 		"status": None,
 		"execution_time": frappe.cache.hget("report_execution_time", report.name) or 0,
 	}
+
+	if report.snapshot_report and report.doctype_to_sync:
+		if latest_sync := frappe.db.get_all(
+			"DuckDB Sync",
+			filters={"doc_type": report.doctype_to_sync[0].doc_type, "docstatus": 1},
+			fields=["creation"],
+			pluck="creation",
+			order_by="creation desc",
+			limit=1,
+		):
+			return_dict.update(
+				{
+					"snapshot_report": True,
+					"snapshot_at": latest_sync[0],
+				}
+			)
+
+	return return_dict
 
 
 def normalize_result(result, columns):
@@ -158,7 +202,7 @@ def normalize_result(result, columns):
 
 
 @frappe.whitelist()
-def get_script(report_name):
+def get_script(report_name: str):
 	report = get_report_doc(report_name)
 	module = report.module or frappe.db.get_value("DocType", report.ref_doctype, "module")
 
@@ -206,6 +250,30 @@ def get_reference_report(report):
 def run(
 	report_name: str,
 	filters: str | dict | None = None,
+	user: str | None = None,  # Kept for backward compatibility
+	ignore_prepared_report: bool = False,
+	custom_columns: str | list | None = None,
+	is_tree: bool = False,
+	parent_field: str | None = None,
+	are_default_filters: bool = True,
+	js_filters: str | list | None = None,
+) -> dict:
+	return _run(
+		report_name=report_name,
+		filters=filters,
+		ignore_prepared_report=ignore_prepared_report,
+		custom_columns=custom_columns,
+		is_tree=is_tree,
+		parent_field=parent_field,
+		are_default_filters=are_default_filters,
+		js_filters=js_filters,
+	)
+
+
+def _run(
+	*,
+	report_name: str,
+	filters: str | dict | None = None,
 	user: str | None = None,
 	ignore_prepared_report: bool = False,
 	custom_columns: str | list | None = None,
@@ -238,6 +306,8 @@ def run(
 					filters = json.loads(filters)
 
 				dn = filters.pop("prepared_report_name", None)
+				if dn:
+					frappe.has_permission("Prepared Report", "read", dn, throw=True)
 			else:
 				dn = ""
 			result = get_prepared_report_result(report, filters, dn, user)
@@ -423,7 +493,7 @@ def _export_query(form_params, csv_params, populate_response=True):
 
 		data["result"] = filtered_result
 
-	format_fields(data)
+	format_fields(data, file_format_type)
 
 	xlsx_data, column_widths, styles = build_xlsx_data(
 		data,
@@ -476,7 +546,9 @@ def valid_report_name(report_name, suffix):
 	return False
 
 
-def format_fields(data: frappe._dict) -> None:
+def format_fields(data: frappe._dict, file_format_type: str | None = None) -> None:
+	stringify_dates = file_format_type != "Excel"
+
 	for i, col in enumerate(data.columns):
 		if col.get("fieldtype") == "Duration":
 			for row in data.result:
@@ -490,13 +562,13 @@ def format_fields(data: frappe._dict) -> None:
 				val = row.get(index) if isinstance(row, dict) else row[index]
 				if val:
 					row[index] = round(val, col.get("precision"))
-		elif col.get("fieldtype") == "Date":
+		elif col.get("fieldtype") == "Date" and stringify_dates:
 			for row in data.result:
 				index = col.get("fieldname") if isinstance(row, dict) else i
 				val = row.get(index) if isinstance(row, dict) else row[index]
 				if val:
 					row[index] = formatdate(val)
-		elif col.get("fieldtype") == "Datetime":
+		elif col.get("fieldtype") == "Datetime" and stringify_dates:
 			for row in data.result:
 				index = col.get("fieldname") if isinstance(row, dict) else i
 				val = row.get(index) if isinstance(row, dict) else row[index]
@@ -765,7 +837,7 @@ def add_total_row(
 
 
 @frappe.whitelist()
-def get_data_for_custom_field(doctype, field, names=None):
+def get_data_for_custom_field(doctype: str, field: str, names: str | list[str] | None = None):
 	if not frappe.has_permission(doctype, "read"):
 		frappe.throw(_("Not Permitted to read {0}").format(_(doctype)), frappe.PermissionError)
 
@@ -806,7 +878,7 @@ def get_data_for_custom_report(columns, result):
 
 
 @frappe.whitelist()
-def save_report(reference_report, report_name, columns, filters):
+def save_report(reference_report: str, report_name: str, columns: str, filters: str):
 	report_doc = get_report_doc(reference_report)
 
 	docname = frappe.db.exists(
@@ -820,7 +892,7 @@ def save_report(reference_report, report_name, columns, filters):
 
 	if docname:
 		report = frappe.get_doc("Report", docname)
-		existing_jd = json.loads(report.json)
+		existing_jd = frappe.parse_json(report.json or "{}")
 		existing_jd["columns"] = json.loads(columns)
 		existing_jd["filters"] = json.loads(filters)
 		report.update({"json": json.dumps(existing_jd, separators=(",", ":"))})

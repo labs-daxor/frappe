@@ -229,7 +229,7 @@ Object.assign(frappe.utils, {
 	},
 
 	escape_html: function (txt) {
-		if (!txt) return "";
+		if (txt == null) return ""; // null or undefined, but keep 0 / false
 		let escape_html_mapping = {
 			"&": "&amp;",
 			"<": "&lt;",
@@ -241,6 +241,12 @@ Object.assign(frappe.utils, {
 		};
 
 		return String(txt).replace(/[&<>"'`=]/g, (char) => escape_html_mapping[char] || char);
+	},
+
+	// Escape text and wrap in <strong> — use this instead of String.prototype.bold()
+	// so user-supplied values are safely escaped before being injected into HTML.
+	bold: function (txt) {
+		return `<strong>${frappe.utils.escape_html(cstr(txt))}</strong>`;
 	},
 
 	unescape_html: function (txt) {
@@ -927,7 +933,7 @@ Object.assign(frappe.utils, {
 		display_text = null,
 		query_params_obj = null
 	) {
-		display_text = display_text || name;
+		display_text = display_text || frappe.utils.escape_html(name);
 		name = encodeURIComponent(name);
 		let route = `/desk/${encodeURIComponent(
 			doctype.toLowerCase().replace(/ /g, "-")
@@ -1852,21 +1858,16 @@ Object.assign(frappe.utils, {
 		if (!doctype || !name) {
 			return;
 		}
-		try {
-			return frappe
-				.xcall("frappe.desk.search.get_link_title", {
-					doctype: doctype,
-					docname: name,
-				})
-				.then((title) => {
-					frappe.utils.add_link_title(doctype, name, title);
-					return title;
-				});
-		} catch (error) {
-			console.log("Error while fetching link title.");
-			console.log(error);
-			return Promise.resolve(name);
-		}
+		return frappe
+			.xcall("frappe.desk.search.get_link_title", {
+				doctype: doctype,
+				docname: name,
+			})
+			.then((title) => {
+				frappe.utils.add_link_title(doctype, name, title);
+				return title;
+			})
+			.catch(() => name);
 	},
 
 	only_allow_num_decimal(input) {

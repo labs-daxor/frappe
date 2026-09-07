@@ -771,7 +771,6 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
 					col.type == "Subject" ? "list-subject level" : "hidden-xs",
 					col.type == "Tag" ? `tag-col ${!this.tags_shown ? "hide" : ""} ` : "",
 					frappe.model.is_numeric_field(col.df) ? "text-right" : "",
-					col.df?.fieldname,
 				].join(" ");
 
 				let html = "";
@@ -785,7 +784,10 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
 					html = `<span ${attrs}>${label}</span>`;
 				}
 
-				return `<div class="${classes}">${html}</div>
+				const fieldname_attr = col.df?.fieldname
+					? `data-fieldname="${col.df.fieldname}"`
+					: "";
+				return `<div class="${classes}" ${fieldname_attr}>${html}</div>
 			`;
 			})
 			.join("");
@@ -1027,7 +1029,6 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
 			"list-row-col ellipsis",
 			class_map[col.type],
 			frappe.model.is_numeric_field(df) ? "text-right" : "",
-			fieldname,
 		].join(" ");
 
 		let column_html;
@@ -1068,7 +1069,7 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
 		}
 
 		return `
-			<div class="${css_class}">
+			<div class="${css_class}" ${fieldname ? `data-fieldname="${fieldname}"` : ""}>
 				${column_html}
 			</div>
 		`;
@@ -1082,7 +1083,9 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
 	apply_column_widths() {
 		if (this.list_view_settings?.disable_scrolling) return;
 		Object.entries(this.column_max_widths).forEach(([fieldname, width]) => {
-			$(`.list-view .frappe-list .result .level-left .list-row-col.${fieldname}`).css({
+			$(
+				`.list-view .frappe-list .result .level-left .list-row-col[data-fieldname="${fieldname}"]`
+			).css({
 				width: width,
 				flex: `1 0 ${width}px`,
 			});
@@ -2396,6 +2399,9 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
 							const field_key = `${field_doc.label} (${doctype})`;
 							field_mappings[field_key] = Object.assign({}, field_doc, {
 								is_child_field: false,
+								translated_label: `${__(field_doc.label, null, doctype)} (${__(
+									doctype
+								)})`,
 							});
 						}
 
@@ -2411,6 +2417,11 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
 										is_child_field: true,
 										child_doctype: child_doctype,
 										parent_table_field: field_doc.fieldname,
+										translated_label: `${__(
+											child_field.label,
+											null,
+											child_doctype
+										)} (${__(field_doc.label, null, doctype)})`,
 									});
 								}
 							});
@@ -2420,6 +2431,7 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
 					this.disable_list_update = true;
 					bulk_operations.edit(this.get_checked_items(true), field_mappings, () => {
 						this.disable_list_update = false;
+						this.clear_checked_items();
 						this.refresh();
 					});
 				},
@@ -2667,6 +2679,9 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
 					});
 				} else if (Array.isArray(value)) {
 					filters.push([doctype, field, value[0], value[1]]);
+				} else if (["_assign", "_liked_by"].includes(field)) {
+					// stored as a JSON array, so an exact match can never hit
+					filters.push([doctype, field, "like", `%${value}%`]);
 				} else {
 					filters.push([doctype, field, "=", value]);
 				}

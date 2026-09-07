@@ -1,15 +1,17 @@
 # Copyright (c) 2019, Frappe Technologies and contributors
 # License: MIT. See LICENSE
 
-import datetime
 import json
+from datetime import datetime
+from typing import Any
 
 import frappe
 from frappe import _
-from frappe.boot import get_allowed_report_names
+from frappe.desk.desk_views import DeskViews
 from frappe.model.document import Document
 from frappe.model.naming import append_number_if_name_exists
 from frappe.modules.export_file import export_to_files
+from frappe.permissions import get_doctypes_with_read
 from frappe.utils import cint, flt, get_datetime, getdate, has_common, now_datetime, nowdate
 from frappe.utils.dashboard import cache_source
 from frappe.utils.data import format_date
@@ -38,9 +40,9 @@ def get_permission_query_conditions(user):
 	module_condition = False
 
 	allowed_doctypes = [frappe.db.escape(doctype) for doctype in frappe.permissions.get_doctypes_with_read()]
-	allowed_reports = [frappe.db.escape(report) for report in get_allowed_report_names()]
+	allowed_reports = [frappe.db.escape(report) for report in DeskViews.get_allowed_report_names(user=user)]
 	allowed_modules = [
-		frappe.db.escape(module.get("module_name")) for module in get_modules_from_all_apps_for_user()
+		frappe.db.escape(module.get("module_name")) for module in get_modules_from_all_apps_for_user(user)
 	]
 
 	if allowed_doctypes:
@@ -76,10 +78,10 @@ def has_permission(doc, ptype, user):
 		if has_common(roles, allowed):
 			return True
 	elif doc.chart_type == "Report":
-		if doc.report_name in get_allowed_report_names():
+		if doc.report_name in DeskViews.get_allowed_report_names(user=user):
 			return True
 	else:
-		allowed_doctypes = frappe.permissions.get_doctypes_with_read()
+		allowed_doctypes = get_doctypes_with_read(user)
 		if doc.document_type in allowed_doctypes:
 			return True
 
@@ -89,16 +91,16 @@ def has_permission(doc, ptype, user):
 @frappe.whitelist()
 @cache_source
 def get(
-	chart_name=None,
-	chart=None,
-	no_cache=None,
-	filters=None,
-	from_date=None,
-	to_date=None,
-	timespan=None,
-	time_interval=None,
-	heatmap_year=None,
-	refresh=None,
+	chart_name: str | None = None,
+	chart: str | dict[str, Any] | None = None,
+	no_cache: bool | int | None = None,
+	filters: str | list | dict[str, Any] | None = None,
+	from_date: str | datetime | None = None,
+	to_date: str | datetime | None = None,
+	timespan: str | None = None,
+	time_interval: str | None = None,
+	heatmap_year: str | int | None = None,
+	refresh: bool | int | None = None,
 ):
 	if chart_name:
 		chart: DashboardChart = frappe.get_doc("Dashboard Chart", chart_name)
@@ -139,7 +141,7 @@ def get(
 
 
 @frappe.whitelist()
-def create_dashboard_chart(args):
+def create_dashboard_chart(args: str | dict[str, Any]):
 	args = frappe.parse_json(args)
 	doc = frappe.new_doc("Dashboard Chart")
 
@@ -156,7 +158,7 @@ def create_dashboard_chart(args):
 
 
 @frappe.whitelist()
-def create_report_chart(args):
+def create_report_chart(args: str | dict[str, Any]):
 	doc = create_dashboard_chart(args)
 	args = frappe.parse_json(args)
 	args.chart_name = doc.chart_name
@@ -165,7 +167,7 @@ def create_report_chart(args):
 
 
 @frappe.whitelist()
-def add_chart_to_dashboard(args):
+def add_chart_to_dashboard(args: str | dict[str, Any]):
 	args = frappe.parse_json(args)
 
 	dashboard = frappe.get_doc("Dashboard", args.dashboard)
@@ -328,7 +330,9 @@ def get_result(data, timegrain, from_date, to_date, chart_type):
 
 @frappe.whitelist()
 @frappe.validate_and_sanitize_search_inputs
-def get_charts_for_user(doctype, txt, searchfield, start, page_len, filters):
+def get_charts_for_user(
+	doctype: str, txt: str, searchfield: str, start: int, page_len: int, filters: str | list | dict[str, Any]
+):
 	or_filters = {"owner": frappe.session.user, "is_public": 1}
 	return frappe.db.get_list(
 		"Dashboard Chart", fields=["name"], filters=filters, or_filters=or_filters, as_list=1

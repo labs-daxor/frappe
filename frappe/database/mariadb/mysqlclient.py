@@ -80,6 +80,10 @@ class MariaDBExceptionUtil:
 		return e.args and e.args[0] == ER.DATA_TOO_LONG
 
 	@staticmethod
+	def is_data_truncated(e: MySQLdb.Error) -> bool:
+		return e.args and e.args[0] == ER.TRUNCATED_WRONG_VALUE
+
+	@staticmethod
 	def is_db_table_size_limit(e: MySQLdb.Error) -> bool:
 		return e.args and e.args[0] == ER.TOO_BIG_ROWSIZE
 
@@ -364,24 +368,26 @@ class MariaDBDatabase(MariaDBConnectionUtil, MariaDBExceptionUtil, Database):
 	def get_table_columns_description(self, table_name):
 		"""Return list of columns with descriptions."""
 		return self.sql(
-			f"""select
+			"""select
 			column_name as 'name',
 			column_type as 'type',
 			column_default as 'default',
 			COALESCE(
 				(select 1
 				from information_schema.statistics
-				where table_name="{table_name}"
+				where table_name=%(table_name)s
 					and column_name=columns.column_name
 					and NON_UNIQUE=1
 					and Seq_in_index = 1
+					and table_schema = %(schema)s
 					limit 1
 			), 0) as 'index',
 			column_key = 'UNI' as 'unique',
 			(is_nullable = 'NO') AS 'not_nullable'
 			from information_schema.columns as columns
-			where table_name = '{table_name}'
-   			and table_schema = '{frappe.db.cur_db_name}' """,
+			where table_name = %(table_name)s
+   			and table_schema = %(schema)s """,
+			{"table_name": table_name, "schema": self.cur_db_name},
 			as_dict=1,
 		)
 
@@ -416,7 +422,7 @@ class MariaDBDatabase(MariaDBConnectionUtil, MariaDBExceptionUtil, Database):
 
 		indexes = self.sql(
 			f"""SHOW INDEX FROM `{table_name}`
-				WHERE Column_name = "{fieldname}"
+				WHERE Column_name = BINARY "{fieldname}"
 					AND Seq_in_index = 1
 					AND Non_unique={int(not unique)}
 					AND Index_type != 'FULLTEXT'
@@ -589,11 +595,8 @@ class MariaDBDatabase(MariaDBConnectionUtil, MariaDBExceptionUtil, Database):
 			self._cursor = original_cursor
 			new_cursor.close()
 
-	def estimate_count(self, doctype: str):
-		"""Get estimated count of total rows in a table."""
+	def _estimate_count(self, table: str) -> int:
 		from frappe.utils.data import cint
-
-		table = get_table_name(doctype)
 
 		# Scope to current database to avoid cross-site estimates
 		count = self.sql(
